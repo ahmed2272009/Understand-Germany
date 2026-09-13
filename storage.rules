@@ -1,0 +1,46 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.admin == true ||
+        request.auth.token.role == 'admin' ||
+        (request.auth.token.email == 'admin@deutschquest.app' && request.auth.token.email_verified == true)
+      );
+    }
+
+    // Audio assets & pronunciation samples: Public read, Admin write only
+    match /audio/{allPaths=**} {
+      allow read: if true;
+      allow write: if isAdmin() &&
+        request.resource.size < 10 * 1024 * 1024 && // Max 10MB
+        request.resource.contentType.matches('audio/.*');
+    }
+
+    // Curriculum imagery (illustrations, diagrams): Public read, Admin write only
+    match /curriculum_images/{allPaths=**} {
+      allow read: if true;
+      allow write: if isAdmin() &&
+        request.resource.size < 5 * 1024 * 1024 && // Max 5MB
+        request.resource.contentType.matches('image/.*');
+    }
+
+    // User avatar uploads (Isolated per user UID)
+    match /avatars/{userId}/{fileName} {
+      allow read: if true;
+      allow write: if isAuthenticated() && request.auth.uid == userId &&
+        request.resource.size < 2 * 1024 * 1024 && // Max 2MB
+        request.resource.contentType.matches('image/(jpeg|png|webp|svg\+xml)');
+    }
+
+    // Default deny all other paths
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

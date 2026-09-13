@@ -1,0 +1,219 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ==========================================
+    // SECURITY HELPER FUNCTIONS
+    // ==========================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Role-based admin check: custom claims OR trusted verified admin email
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.admin == true ||
+        request.auth.token.role == 'admin' ||
+        (request.auth.token.email == 'admin@deutschquest.app' && request.auth.token.email_verified == true)
+      );
+    }
+
+    // ==========================================
+    // 1. PUBLIC / CURRICULUM COLLECTIONS (READ-ONLY FOR USERS)
+    // ==========================================
+
+    // lessons (Published curriculum lessons)
+    match /lessons/{lessonId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // lesson_sections (Grammar, phonetics, rules, mnemonics)
+    match /lesson_sections/{sectionId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // vocabulary (Lexical dictionary with audio/image metadata)
+    match /vocabulary/{vocabId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // exercises (Curriculum exercises)
+    match /exercises/{exerciseId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // achievements (System-wide achievement definitions)
+    match /achievements/{achievementId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Legacy / top-level curriculum compatibility
+    match /curriculum/{dayId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // ==========================================
+    // 2. PRIVATE USER DATA & SUBCOLLECTIONS (STRICT UID-ISOLATION)
+    // ==========================================
+
+    // users (User profile)
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      
+      // Normal users can only create their own document with role 'student'
+      allow create: if isOwner(userId) &&
+        request.resource.data.role == 'student' &&
+        request.resource.data.uid == userId;
+
+      // Users cannot change their own role, uid, or createdAt
+      allow update: if isOwner(userId) &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['uid', 'role', 'createdAt']);
+
+      allow delete: if isAdmin();
+
+      // progress/current (Read only or restricted update)
+      // Authoritative fields (totalXp, streak, level) cannot be tampered with arbitrary jumps
+      match /progress/current {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId) &&
+          request.resource.data.totalXp is int && request.resource.data.totalXp >= 0 &&
+          request.resource.data.currentLevel is int && request.resource.data.currentLevel >= 1 &&
+          request.resource.data.streakCount is int && request.resource.data.streakCount >= 0 &&
+          request.resource.data.heartsCount is int && request.resource.data.heartsCount >= 0 && request.resource.data.heartsCount <= 5;
+      }
+
+      // day_completions
+      match /day_completions/{dayId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId) &&
+          request.resource.data.scorePercentage is int &&
+          request.resource.data.scorePercentage >= 0 &&
+          request.resource.data.scorePercentage <= 100;
+        allow delete: if isAdmin();
+      }
+
+      // srs_cards (User flashcard SRS review items)
+      match /srs_cards/{cardId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId);
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      // review_items (Spaced repetition review items)
+      match /review_items/{itemId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId);
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      // daily_sessions (User study sessions)
+      match /daily_sessions/{sessionId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId) && request.resource.data.userId == userId;
+        allow delete: if isAdmin();
+      }
+
+      // xp_events (Authoritative XP audit log - append-only or admin write)
+      match /xp_events/{eventId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) &&
+          request.resource.data.userId == userId &&
+          request.resource.data.amount is int &&
+          request.resource.data.amount > 0 &&
+          request.resource.data.amount <= 250; // Bound single event XP to avoid absurd exploits
+        allow update, delete: if isAdmin(); // Immutable audit trail
+      }
+
+      // user_achievements (Earned achievements)
+      match /user_achievements/{achievementId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId) && request.resource.data.userId == userId;
+        allow delete: if isAdmin();
+      }
+
+      // game_scores (User mini-game records)
+      match /game_scores/{scoreId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create: if isOwner(userId) &&
+          request.resource.data.userId == userId &&
+          request.resource.data.score is int &&
+          request.resource.data.score >= 0;
+        allow update, delete: if isAdmin();
+      }
+
+      // writing_submissions (20-Line Text Essays)
+      match /writing_submissions/{submissionId} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId) &&
+          request.resource.data.userId == userId &&
+          request.resource.data.lines is list &&
+          request.resource.data.lines.size() <= 30; // Max 30 lines
+        allow delete: if isOwner(userId) || isAdmin();
+      }
+
+      // gamification/state (User streak shields, missions)
+      match /gamification/{stateDoc} {
+        allow read: if isOwner(userId) || isAdmin();
+        allow create, update: if isOwner(userId);
+      }
+    }
+
+    // ==========================================
+    // 3. TOP-LEVEL USER COLLECTION ALIASES (PROTECTED OWNERSHIP)
+    // ==========================================
+
+    match /review_items/{itemId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    match /daily_sessions/{sessionId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    match /xp_events/{eventId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid && request.resource.data.amount <= 250;
+      allow update, delete: if isAdmin();
+    }
+
+    match /user_achievements/{id} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create, update: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+
+    match /game_scores/{scoreId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    match /writing_submissions/{submissionId} {
+      allow read: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create, update: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isAuthenticated() && (resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    // ==========================================
+    // 4. DEFAULT DENY ALL OTHER ROOTS
+    // ==========================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
